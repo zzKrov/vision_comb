@@ -202,7 +202,7 @@ def load_object_detector():
 def load_labels(labels_path: str) -> list[str]:
     p = Path(labels_path)
     if not p.exists():
-        return ["Clase 0", "Clase 1"]
+        return ["Alguien", "Nadie"]
     labels = []
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -210,7 +210,7 @@ def load_labels(labels_path: str) -> list[str]:
             continue
         parts = line.split(" ", 1)
         labels.append(parts[1].strip() if len(parts) == 2 else parts[0])
-    return labels or ["Clase 0", "Clase 1"]
+    return labels or ["Alguien", "Nadie"]
 
 
 def predict_tm(model, pil_img: Image.Image) -> tuple[np.ndarray, float]:
@@ -236,11 +236,16 @@ def detect_scene_objects(detector, pil_img: Image.Image, conf: float):
     return annotated_rgb, counts
 
 
+def read_wokwi_file(filename: str, fallback: str) -> str:
+    p = ROOT / "wokwi" / filename
+    return p.read_text(encoding="utf-8") if p.exists() else fallback
+
+
 st.markdown(
     """
 <div class="eq-header">
   <h1 class="eq-title">Clasificación y objetos</h1>
-  <p class="eq-subtitle">Combina tu modelo entrenado con detección de 80 objetos y completa misiones.</p>
+  <p class="eq-subtitle">Detecta presencia con tu modelo y objetos del entorno en una misma captura.</p>
 </div>
     """,
     unsafe_allow_html=True,
@@ -259,7 +264,7 @@ with s1:
   <div>
     <span class="eq-step-num">01</span>
     <p class="eq-step-title">Encuadra</p>
-    <p class="eq-step-text">Incluye el objeto de la misión en la toma.</p>
+    <p class="eq-step-text">Incluye el objeto de la misión en la escena.</p>
   </div>
 </div>
         """,
@@ -272,8 +277,8 @@ with s2:
   {svg_step_capture()}
   <div>
     <span class="eq-step-num">02</span>
-    <p class="eq-step-title">Analiza</p>
-    <p class="eq-step-text">Se evalúan el modelo y los objetos a la vez.</p>
+    <p class="eq-step-title">Captura</p>
+    <p class="eq-step-text">Se evalúan presencia y objetos al instante.</p>
   </div>
 </div>
         """,
@@ -286,8 +291,8 @@ with s3:
   {svg_step_result()}
   <div>
     <span class="eq-step-num">03</span>
-    <p class="eq-step-title">Suma puntos</p>
-    <p class="eq-step-text">Desbloquea objetos nuevos y sube de nivel.</p>
+    <p class="eq-step-title">Progreso</p>
+    <p class="eq-step-text">Completa misiones y desbloquea la colección.</p>
   </div>
 </div>
         """,
@@ -362,8 +367,15 @@ with col_out:
         scores = [(i, labels[i], float(preds[i])) for i in range(n_classes)]
         top_idx, top_label, top_conf = max(scores, key=lambda x: x[2])
 
-        events = register_scan(raw_bytes, list(obj_counts.keys()), tm_label=top_label)
+        st.session_state["tm_last_idx"] = top_idx
+        st.session_state["tm_last_label"] = top_label
 
+        events = register_scan(
+            raw_bytes,
+            list(obj_counts.keys()),
+            tm_idx=top_idx,
+            tm_label=top_label,
+        )
         for ev in events:
             st.markdown(f'<div class="eq-event">{ev}</div>', unsafe_allow_html=True)
 
@@ -372,7 +384,7 @@ with col_out:
 <div class="eq-result-box">
   <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
-  <p style="font-size:0.76rem;color:#8B929E;margin:0 0 0.25rem 0;text-transform:uppercase;letter-spacing:0.08em;">Clase del modelo</p>
+  <p style="font-size:0.76rem;color:#8B929E;margin:0 0 0.25rem 0;text-transform:uppercase;letter-spacing:0.08em;">Estado detectado</p>
   <p class="eq-result-label">{top_label}</p>
   <p class="eq-result-meta">{top_conf * 100:.1f} % · {elapsed_ms:.0f} ms</p>
 </div>
@@ -423,34 +435,159 @@ st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)
 render_collection_grid()
 
 # ---------------------------------------------------------------------------
-# Circuito Wokwi fijo (480802023080679425)
+# Simulación en Wokwi (proyecto fijo 480802023080679425)
 # ---------------------------------------------------------------------------
 st.markdown('<hr class="eq-divider">', unsafe_allow_html=True)
 st.markdown(
     f"""
 <div class="eq-header" style="margin-bottom:0.9rem;">
   <h2 style="font-size:1.35rem;font-weight:600;margin:0 0 0.25rem 0;">Circuito en Wokwi</h2>
-  <p class="eq-subtitle">Simulación integrada del proyecto {WOKWI_PROJECT_ID}.</p>
+  <p class="eq-subtitle">Simulador integrado ({WOKWI_PROJECT_ID}) y código actualizado para Alguien / Nadie.</p>
 </div>
     """,
     unsafe_allow_html=True,
 )
 
-embed_url = f"https://wokwi.com/projects/{WOKWI_PROJECT_ID}?embed=1"
-st.markdown(
-    f"""
+DEFAULT_INO = """#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const int LED_ALGUIEN = 8;
+const int LED_NADIE   = 9;
+const int BTN_ALGUIEN = 2;
+const int BTN_NADIE   = 3;
+
+int estado = -1;
+
+void aplicarEstado(int nuevo) {
+  if (nuevo == estado) return;
+  estado = nuevo;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  if (estado == 0) {
+    digitalWrite(LED_ALGUIEN, HIGH);
+    digitalWrite(LED_NADIE, LOW);
+    lcd.print("Estado: 0");
+    lcd.setCursor(0, 1);
+    lcd.print("Alguien");
+    Serial.println("Estado 0: Alguien");
+  } else {
+    digitalWrite(LED_ALGUIEN, LOW);
+    digitalWrite(LED_NADIE, HIGH);
+    lcd.print("Estado: 1");
+    lcd.setCursor(0, 1);
+    lcd.print("Nadie");
+    Serial.println("Estado 1: Nadie");
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(LED_ALGUIEN, OUTPUT);
+  pinMode(LED_NADIE, OUTPUT);
+  pinMode(BTN_ALGUIEN, INPUT_PULLUP);
+  pinMode(BTN_NADIE, INPUT_PULLUP);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Listo");
+  lcd.setCursor(0, 1);
+  lcd.print("Envia 0 o 1");
+}
+
+void loop() {
+  if (digitalRead(BTN_ALGUIEN) == LOW) {
+    aplicarEstado(0);
+    delay(200);
+  }
+  if (digitalRead(BTN_NADIE) == LOW) {
+    aplicarEstado(1);
+    delay(200);
+  }
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '0') aplicarEstado(0);
+    if (c == '1') aplicarEstado(1);
+  }
+}
+"""
+
+DEFAULT_DIAGRAM = """{
+  "version": 1,
+  "author": "Vision",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-lcd1602", "id": "lcd1", "top": -150, "left": 290, "attrs": { "pins": "i2c" } },
+    { "type": "wokwi-led", "id": "led0", "top": 60, "left": 330, "attrs": { "color": "cyan", "label": "Alguien" } },
+    { "type": "wokwi-led", "id": "led1", "top": 60, "left": 390, "attrs": { "color": "red", "label": "Nadie" } },
+    { "type": "wokwi-resistor", "id": "r0", "top": 140, "left": 325, "rotate": 90, "attrs": { "value": "220" } },
+    { "type": "wokwi-resistor", "id": "r1", "top": 140, "left": 385, "rotate": 90, "attrs": { "value": "220" } },
+    { "type": "wokwi-pushbutton", "id": "btn0", "top": 220, "left": 320, "attrs": { "color": "blue", "label": "0" } },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 220, "left": 400, "attrs": { "color": "red", "label": "1" } }
+  ],
+  "connections": [
+    [ "uno:5V", "lcd1:VCC", "red", [ "v0" ] ],
+    [ "uno:GND.2", "lcd1:GND", "black", [ "v0" ] ],
+    [ "uno:A4", "lcd1:SDA", "green", [ "v0" ] ],
+    [ "uno:A5", "lcd1:SCL", "yellow", [ "v0" ] ],
+    [ "uno:8", "r0:1", "cyan", [ "v0" ] ],
+    [ "r0:2", "led0:A", "cyan", [ "v0" ] ],
+    [ "led0:C", "uno:GND.1", "black", [ "v0" ] ],
+    [ "uno:9", "r1:1", "red", [ "v0" ] ],
+    [ "r1:2", "led1:A", "red", [ "v0" ] ],
+    [ "led1:C", "uno:GND.1", "black", [ "v0" ] ],
+    [ "uno:2", "btn0:1.l", "blue", [ "v0" ] ],
+    [ "btn0:2.l", "uno:GND.2", "black", [ "v0" ] ],
+    [ "uno:3", "btn1:1.l", "orange", [ "v0" ] ],
+    [ "btn1:2.l", "uno:GND.2", "black", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}
+"""
+
+sketch_code = read_wokwi_file("sketch.ino", DEFAULT_INO)
+diagram_code = read_wokwi_file("diagram.json", DEFAULT_DIAGRAM)
+libs_code = read_wokwi_file("libraries.txt", "LiquidCrystal I2C\n")
+
+tab_sim, tab_ino, tab_diag, tab_libs = st.tabs(
+    ["Simulador", "sketch.ino", "diagram.json", "libraries.txt"]
+)
+
+with tab_sim:
+    last_idx = st.session_state.get("tm_last_idx")
+    last_lbl = st.session_state.get("tm_last_label")
+    signal_txt = f"{last_idx} · {last_lbl}" if last_idx is not None else "—"
+    embed_url = f"https://wokwi.com/projects/{WOKWI_PROJECT_ID}?embed=1"
+
+    st.markdown(
+        f"""
 <div class="eq-frame" style="padding:0.75rem;">
   <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
   <div style="display:flex;justify-content:space-between;align-items:center;">
     <span style="font-size:0.82rem;color:#8B929E;">Wokwi · #{WOKWI_PROJECT_ID}</span>
-    <span class="eq-pill">Puntos actuales: {st.session_state['gm_points']}</span>
+    <span class="eq-pill">Última lectura: {signal_txt}</span>
   </div>
 </div>
-    """,
-    unsafe_allow_html=True,
-)
-components.html(
-    f'<iframe src="{embed_url}" style="width:100%;height:540px;border:1px solid rgba(226,232,240,0.16);background:#090A0C;" allowfullscreen></iframe>',
-    height=555,
-)
+        """,
+        unsafe_allow_html=True,
+    )
+    components.html(
+        f'<iframe src="{embed_url}" style="width:100%;height:540px;border:1px solid rgba(226,232,240,0.16);background:#090A0C;" allowfullscreen></iframe>',
+        height=555,
+    )
+
+with tab_ino:
+    st.code(sketch_code, language="cpp")
+    st.download_button("Descargar sketch.ino", sketch_code, file_name="sketch.ino", mime="text/plain")
+
+with tab_diag:
+    st.code(diagram_code, language="json")
+    st.download_button("Descargar diagram.json", diagram_code, file_name="diagram.json", mime="application/json")
+
+with tab_libs:
+    st.code(libs_code, language="text")
+    st.download_button("Descargar libraries.txt", libs_code, file_name="libraries.txt", mime="text/plain")
