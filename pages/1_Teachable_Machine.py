@@ -236,11 +236,6 @@ def detect_scene_objects(detector, pil_img: Image.Image, conf: float):
     return annotated_rgb, counts
 
 
-def read_wokwi_file(filename: str, fallback: str) -> str:
-    p = ROOT / "wokwi" / filename
-    return p.read_text(encoding="utf-8") if p.exists() else fallback
-
-
 st.markdown(
     """
 <div class="eq-header">
@@ -435,159 +430,85 @@ st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)
 render_collection_grid()
 
 # ---------------------------------------------------------------------------
-# Simulación en Wokwi (proyecto fijo 480802023080679425)
+# Marco decorado del simulador Wokwi
 # ---------------------------------------------------------------------------
 st.markdown('<hr class="eq-divider">', unsafe_allow_html=True)
 st.markdown(
-    f"""
-<div class="eq-header" style="margin-bottom:0.9rem;">
-  <h2 style="font-size:1.35rem;font-weight:600;margin:0 0 0.25rem 0;">Circuito en Wokwi</h2>
-  <p class="eq-subtitle">Simulador integrado ({WOKWI_PROJECT_ID}) y código actualizado para Alguien / Nadie.</p>
-</div>
-    """,
+    '<h2 style="font-size:1.3rem;font-weight:600;margin:0 0 0.85rem 0;">Circuito</h2>',
     unsafe_allow_html=True,
 )
 
-DEFAULT_INO = """#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-const int LED_ALGUIEN = 8;
-const int LED_NADIE   = 9;
-const int BTN_ALGUIEN = 2;
-const int BTN_NADIE   = 3;
-
-int estado = -1;
-
-void aplicarEstado(int nuevo) {
-  if (nuevo == estado) return;
-  estado = nuevo;
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  if (estado == 0) {
-    digitalWrite(LED_ALGUIEN, HIGH);
-    digitalWrite(LED_NADIE, LOW);
-    lcd.print("Estado: 0");
-    lcd.setCursor(0, 1);
-    lcd.print("Alguien");
-    Serial.println("Estado 0: Alguien");
-  } else {
-    digitalWrite(LED_ALGUIEN, LOW);
-    digitalWrite(LED_NADIE, HIGH);
-    lcd.print("Estado: 1");
-    lcd.setCursor(0, 1);
-    lcd.print("Nadie");
-    Serial.println("Estado 1: Nadie");
-  }
-}
-
-void setup() {
-  Serial.begin(9600);
-  pinMode(LED_ALGUIEN, OUTPUT);
-  pinMode(LED_NADIE, OUTPUT);
-  pinMode(BTN_ALGUIEN, INPUT_PULLUP);
-  pinMode(BTN_NADIE, INPUT_PULLUP);
-
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Listo");
-  lcd.setCursor(0, 1);
-  lcd.print("Envia 0 o 1");
-}
-
-void loop() {
-  if (digitalRead(BTN_ALGUIEN) == LOW) {
-    aplicarEstado(0);
-    delay(200);
-  }
-  if (digitalRead(BTN_NADIE) == LOW) {
-    aplicarEstado(1);
-    delay(200);
-  }
-  if (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '0') aplicarEstado(0);
-    if (c == '1') aplicarEstado(1);
-  }
-}
-"""
-
-DEFAULT_DIAGRAM = """{
-  "version": 1,
-  "author": "Vision",
-  "editor": "wokwi",
-  "parts": [
-    { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} },
-    { "type": "wokwi-lcd1602", "id": "lcd1", "top": -150, "left": 290, "attrs": { "pins": "i2c" } },
-    { "type": "wokwi-led", "id": "led0", "top": 60, "left": 330, "attrs": { "color": "cyan", "label": "Alguien" } },
-    { "type": "wokwi-led", "id": "led1", "top": 60, "left": 390, "attrs": { "color": "red", "label": "Nadie" } },
-    { "type": "wokwi-resistor", "id": "r0", "top": 140, "left": 325, "rotate": 90, "attrs": { "value": "220" } },
-    { "type": "wokwi-resistor", "id": "r1", "top": 140, "left": 385, "rotate": 90, "attrs": { "value": "220" } },
-    { "type": "wokwi-pushbutton", "id": "btn0", "top": 220, "left": 320, "attrs": { "color": "blue", "label": "0" } },
-    { "type": "wokwi-pushbutton", "id": "btn1", "top": 220, "left": 400, "attrs": { "color": "red", "label": "1" } }
-  ],
-  "connections": [
-    [ "uno:5V", "lcd1:VCC", "red", [ "v0" ] ],
-    [ "uno:GND.2", "lcd1:GND", "black", [ "v0" ] ],
-    [ "uno:A4", "lcd1:SDA", "green", [ "v0" ] ],
-    [ "uno:A5", "lcd1:SCL", "yellow", [ "v0" ] ],
-    [ "uno:8", "r0:1", "cyan", [ "v0" ] ],
-    [ "r0:2", "led0:A", "cyan", [ "v0" ] ],
-    [ "led0:C", "uno:GND.1", "black", [ "v0" ] ],
-    [ "uno:9", "r1:1", "red", [ "v0" ] ],
-    [ "r1:2", "led1:A", "red", [ "v0" ] ],
-    [ "led1:C", "uno:GND.1", "black", [ "v0" ] ],
-    [ "uno:2", "btn0:1.l", "blue", [ "v0" ] ],
-    [ "btn0:2.l", "uno:GND.2", "black", [ "v0" ] ],
-    [ "uno:3", "btn1:1.l", "orange", [ "v0" ] ],
-    [ "btn1:2.l", "uno:GND.2", "black", [ "v0" ] ]
-  ],
-  "dependencies": {}
-}
-"""
-
-sketch_code = read_wokwi_file("sketch.ino", DEFAULT_INO)
-diagram_code = read_wokwi_file("diagram.json", DEFAULT_DIAGRAM)
-libs_code = read_wokwi_file("libraries.txt", "LiquidCrystal I2C\n")
-
-tab_sim, tab_ino, tab_diag, tab_libs = st.tabs(
-    ["Simulador", "sketch.ino", "diagram.json", "libraries.txt"]
-)
-
-with tab_sim:
-    last_idx = st.session_state.get("tm_last_idx")
-    last_lbl = st.session_state.get("tm_last_label")
-    signal_txt = f"{last_idx} · {last_lbl}" if last_idx is not None else "—"
-    embed_url = f"https://wokwi.com/projects/{WOKWI_PROJECT_ID}?embed=1"
-
-    st.markdown(
-        f"""
-<div class="eq-frame" style="padding:0.75rem;">
-  <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
-  <span class="eq-corner bl"></span><span class="eq-corner br"></span>
-  <div style="display:flex;justify-content:space-between;align-items:center;">
-    <span style="font-size:0.82rem;color:#8B929E;">Wokwi · #{WOKWI_PROJECT_ID}</span>
-    <span class="eq-pill">Última lectura: {signal_txt}</span>
-  </div>
+embed_url = f"https://wokwi.com/projects/{WOKWI_PROJECT_ID}?embed=1"
+components.html(
+    f"""
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  html, body {{ background: transparent; overflow: hidden; }}
+  .shell {{
+    position: relative;
+    padding: 14px;
+    background: #111317;
+    border: 1px solid rgba(226, 232, 240, 0.14);
+    transition: border-color 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+                box-shadow 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }}
+  .shell:hover {{
+    border-color: rgba(214, 228, 255, 0.45);
+    box-shadow: 0 0 28px rgba(214, 228, 255, 0.06);
+  }}
+  .corner {{
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+    transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }}
+  .tl {{ top: -1px; left: -1px; border-top: 2px solid #D6E4FF; border-left: 2px solid #D6E4FF; }}
+  .tr {{ top: -1px; right: -1px; border-top: 2px solid #D6E4FF; border-right: 2px solid #D6E4FF; }}
+  .bl {{ bottom: -1px; left: -1px; border-bottom: 2px solid #D6E4FF; border-left: 2px solid #D6E4FF; }}
+  .br {{ bottom: -1px; right: -1px; border-bottom: 2px solid #D6E4FF; border-right: 2px solid #D6E4FF; }}
+  .shell:hover .tl {{ transform: translate(-2px, -2px); }}
+  .shell:hover .tr {{ transform: translate(2px, -2px); }}
+  .shell:hover .bl {{ transform: translate(-2px, 2px); }}
+  .shell:hover .br {{ transform: translate(2px, 2px); }}
+  .rail {{
+    height: 2px;
+    width: 100%;
+    background: rgba(214, 228, 255, 0.1);
+    margin-bottom: 10px;
+    position: relative;
+    overflow: hidden;
+  }}
+  .rail::after {{
+    content: "";
+    position: absolute;
+    top: 0;
+    left: -30%;
+    width: 30%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, #D6E4FF, transparent);
+    animation: glide 4.5s ease-in-out infinite;
+  }}
+  @keyframes glide {{
+    0%   {{ left: -30%; }}
+    100% {{ left: 100%; }}
+  }}
+  iframe {{
+    display: block;
+    width: 100%;
+    height: 540px;
+    border: 1px solid rgba(226, 232, 240, 0.12);
+    background: #090A0C;
+  }}
+</style>
+<div class="shell">
+  <span class="corner tl"></span>
+  <span class="corner tr"></span>
+  <span class="corner bl"></span>
+  <span class="corner br"></span>
+  <div class="rail"></div>
+  <iframe src="{embed_url}" allowfullscreen></iframe>
 </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    components.html(
-        f'<iframe src="{embed_url}" style="width:100%;height:540px;border:1px solid rgba(226,232,240,0.16);background:#090A0C;" allowfullscreen></iframe>',
-        height=555,
-    )
-
-with tab_ino:
-    st.code(sketch_code, language="cpp")
-    st.download_button("Descargar sketch.ino", sketch_code, file_name="sketch.ino", mime="text/plain")
-
-with tab_diag:
-    st.code(diagram_code, language="json")
-    st.download_button("Descargar diagram.json", diagram_code, file_name="diagram.json", mime="application/json")
-
-with tab_libs:
-    st.code(libs_code, language="text")
-    st.download_button("Descargar libraries.txt", libs_code, file_name="libraries.txt", mime="text/plain")
+    """,
+    height=590,
+)
