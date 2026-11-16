@@ -1,7 +1,7 @@
 import streamlit as st
 from ui_theme import (
-    inject_theme,
     init_game_state,
+    inject_theme,
     render_collection_grid,
     render_hud,
     render_mission_bar,
@@ -31,7 +31,7 @@ with h2:
         """
 <div class="eq-header" style="margin-bottom:0;">
   <h1 class="eq-title">Visión por computador</h1>
-  <p class="eq-subtitle">Captura objetos reales, completa misiones y desbloquea toda la colección.</p>
+  <p class="eq-subtitle">Detecta presencia y objetos reales, cumple misiones y desbloquea la colección.</p>
 </div>
         """,
         unsafe_allow_html=True,
@@ -52,7 +52,7 @@ with col1:
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
   {svg_step_frame()}
   <h2 class="eq-card-title">Clasificación y objetos</h2>
-  <p class="eq-card-desc">Evalúa tu modelo entrenado junto con detección de 80 objetos y el circuito en Wokwi.</p>
+  <p class="eq-card-desc">Evalúa Alguien / Nadie junto con 80 objetos en escena y el simulador de Wokwi.</p>
 </div>
         """,
         unsafe_allow_html=True,
@@ -68,7 +68,7 @@ with col2:
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
   {svg_step_capture()}
   <h2 class="eq-card-title">Exploración de escena</h2>
-  <p class="eq-card-desc">Busca múltiples objetos a la vez, ajusta umbrales y suma puntos por cada hallazgo.</p>
+  <p class="eq-card-desc">Identifica múltiples objetos a la vez, ajusta los umbrales y acumula puntos.</p>
 </div>
         """,
         unsafe_allow_html=True,
@@ -76,7 +76,7 @@ with col2:
     st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
     st.page_link("pages/2_YOLO.py", label="Abrir exploración", width="stretch")
 
-st.markdown("<div style='height:1.4rem;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:1.3rem;'></div>", unsafe_allow_html=True)
 render_collection_grid()
 
 st.markdown("<div style='height:0.9rem;'></div>", unsafe_allow_html=True)
