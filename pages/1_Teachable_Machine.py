@@ -35,9 +35,21 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @st.cache_resource(show_spinner=False)
 def load_keras_model(model_path: str):
-    from keras.models import load_model
+    import tensorflow as tf
 
-    return load_model(model_path, compile=False)
+    try:
+        return tf.keras.models.load_model(model_path, compile=False)
+    except Exception:
+        class CompatDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
+            def __init__(self, **kwargs):
+                kwargs.pop("groups", None)
+                super().__init__(**kwargs)
+
+        return tf.keras.models.load_model(
+            model_path,
+            compile=False,
+            custom_objects={"DepthwiseConv2D": CompatDepthwiseConv2D},
+        )
 
 
 @st.cache_data(show_spinner=False)
@@ -61,7 +73,7 @@ def predict_image(model, pil_img: Image.Image) -> tuple[np.ndarray, float]:
     arr = np.asarray(rgb, dtype=np.float32)
     normalized = (arr / 127.5) - 1.0
     batch = np.expand_dims(normalized, axis=0)
-    preds = model(batch, training=False).numpy()[0]
+    preds = np.asarray(model(batch, training=False))[0]
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     return preds, elapsed_ms
 
@@ -81,6 +93,13 @@ def extract_wokwi_id(raw: str) -> str:
 def read_wokwi_file(filename: str, fallback: str) -> str:
     p = ROOT / "wokwi" / filename
     return p.read_text(encoding="utf-8") if p.exists() else fallback
+
+
+def get_default_wokwi_id() -> str:
+    try:
+        return st.secrets.get("WOKWI_PROJECT_ID", DEFAULT_WOKWI_ID)
+    except Exception:
+        return DEFAULT_WOKWI_ID
 
 
 # Encabezado
@@ -258,10 +277,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-default_val = st.secrets.get("WOKWI_PROJECT_ID", DEFAULT_WOKWI_ID) if hasattr(st, "secrets") else DEFAULT_WOKWI_ID
 wokwi_input = st.text_input(
     "Enlace o ID del proyecto en Wokwi",
-    value=default_val,
+    value=get_default_wokwi_id(),
     placeholder="https://wokwi.com/projects/437217078075500545",
 )
 wokwi_id = extract_wokwi_id(wokwi_input)
