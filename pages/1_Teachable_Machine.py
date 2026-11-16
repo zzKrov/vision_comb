@@ -1,5 +1,5 @@
+import io
 from pathlib import Path
-import re
 import time
 
 import numpy as np
@@ -8,15 +8,20 @@ import streamlit.components.v1 as components
 from PIL import Image, ImageOps
 
 from ui_theme import (
+    WOKWI_PROJECT_ID,
+    init_game_state,
     inject_theme,
+    register_scan,
+    render_collection_grid,
+    render_hud,
+    render_mission_bar,
     render_topbar,
     svg_idle_reticle,
     svg_step_capture,
     svg_step_frame,
     svg_step_result,
+    translate_label,
 )
-
-DEFAULT_WOKWI_ID = "480802023080679425"
 
 st.set_page_config(
     page_title="Clasificación · Visión",
@@ -26,7 +31,8 @@ st.set_page_config(
 )
 
 inject_theme()
-render_topbar(active="tm")
+init_game_state()
+render_topbar()
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -37,7 +43,6 @@ def load_keras_model(model_path: str):
     import h5py
     import tensorflow as tf
 
-    # 1) Carga directa (TF 2.15 / Keras 2 o modelos .h5 simples)
     try:
         return tf.keras.models.load_model(model_path, compile=False)
     except Exception:
@@ -48,7 +53,6 @@ def load_keras_model(model_path: str):
             kwargs.pop("groups", None)
             super().__init__(**kwargs)
 
-    # 2) Parche simple para DepthwiseConv2D (groups=1)
     try:
         return tf.keras.models.load_model(
             model_path,
@@ -58,7 +62,6 @@ def load_keras_model(model_path: str):
     except Exception:
         pass
 
-    # 3) Reconstrucción compatible para Sequential anidados (Teachable Machine en Keras 3)
     from keras.src.legacy.saving import saving_options, saving_utils
 
     def _strip_groups(obj):
@@ -139,23 +142,12 @@ def load_keras_model(model_path: str):
                     if id(var) not in assigned:
                         non_trainable_vars.append(var)
             rem_vars = trainable_vars + non_trainable_vars
-
-            if len(unmatched) != len(rem_vars):
-                raise ValueError(
-                    f"Conteo incompatible en {group.name}: {len(unmatched)} vs {len(rem_vars)}"
-                )
-            for (wn, val), var in zip(unmatched, rem_vars):
-                if tuple(var.shape) != val.shape:
-                    raise ValueError(
-                        f"Forma incompatible para {wn} -> {var.name}: {val.shape} vs {tuple(var.shape)}"
-                    )
+            for (_, val), var in zip(unmatched, rem_vars):
                 var.assign(val)
 
     def _apply_step(x, layer):
         y = layer(x)
-        if isinstance(y, (list, tuple)):
-            y = y[0]
-        return y
+        return y[0] if isinstance(y, (list, tuple)) else y
 
     with h5py.File(model_path, "r") as f:
         raw_cfg = f.attrs["model_config"]
@@ -166,12 +158,10 @@ def load_keras_model(model_path: str):
 
         inp = tf.keras.Input(shape=_find_input_shape(cfg))
         x = inp
-
-        top_layers_cfg = cfg.get("config", {}).get("layers", [])
         pending_weights = []
 
         with saving_options.keras_option_scope(use_legacy_config=True):
-            for sub_cfg in top_layers_cfg:
+            for sub_cfg in cfg.get("config", {}).get("layers", []):
                 if sub_cfg.get("class_name") == "InputLayer":
                     continue
                 sub_name = sub_cfg.get("config", {}).get("name")
@@ -196,11 +186,16 @@ def load_keras_model(model_path: str):
                     pending_weights.append((weights_group[sub_name], loaded_sub))
 
         model = tf.keras.Model(inputs=inp, outputs=x)
-
         for grp, targets in pending_weights:
             _assign_group_weights(grp, targets)
-
         return model
+
+
+@st.cache_resource(show_spinner=False)
+def load_object_detector():
+    from ultralytics import YOLO
+
+    return YOLO("yolov5su.pt")
 
 
 @st.cache_data(show_spinner=False)
@@ -218,53 +213,43 @@ def load_labels(labels_path: str) -> list[str]:
     return labels or ["Clase 0", "Clase 1"]
 
 
-def predict_image(model, pil_img: Image.Image) -> tuple[np.ndarray, float]:
+def predict_tm(model, pil_img: Image.Image) -> tuple[np.ndarray, float]:
     t0 = time.perf_counter()
     rgb = ImageOps.fit(pil_img.convert("RGB"), (224, 224), Image.Resampling.LANCZOS)
     arr = np.asarray(rgb, dtype=np.float32)
     normalized = (arr / 127.5) - 1.0
     batch = np.expand_dims(normalized, axis=0)
     preds = np.asarray(model(batch, training=False))[0]
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    return preds, elapsed_ms
+    return preds, (time.perf_counter() - t0) * 1000.0
 
 
-def extract_wokwi_id(raw: str) -> str:
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    match = re.search(r"wokwi\.com/projects/(\d+)", raw)
-    if match:
-        return match.group(1)
-    if raw.isdigit():
-        return raw
-    return ""
+def detect_scene_objects(detector, pil_img: Image.Image, conf: float):
+    np_bgr = np.array(pil_img.convert("RGB"))[..., ::-1]
+    res = detector(np_bgr, conf=conf, iou=0.45, max_det=50, verbose=False)[0]
+    counts = {}
+    if res.boxes is not None:
+        for box in res.boxes:
+            raw_name = detector.names[int(box.cls.item())]
+            es_name = translate_label(raw_name)
+            counts[es_name] = counts.get(es_name, 0) + 1
+    annotated_rgb = res.plot()[:, :, ::-1]
+    return annotated_rgb, counts
 
 
-def read_wokwi_file(filename: str, fallback: str) -> str:
-    p = ROOT / "wokwi" / filename
-    return p.read_text(encoding="utf-8") if p.exists() else fallback
-
-
-def get_default_wokwi_id() -> str:
-    try:
-        return st.secrets.get("WOKWI_PROJECT_ID", DEFAULT_WOKWI_ID)
-    except Exception:
-        return DEFAULT_WOKWI_ID
-
-
-# Encabezado
 st.markdown(
     """
 <div class="eq-header">
-  <h1 class="eq-title">Clasificación</h1>
-  <p class="eq-subtitle">Compara una imagen con las clases guardadas en tu modelo.</p>
+  <h1 class="eq-title">Clasificación y objetos</h1>
+  <p class="eq-subtitle">Combina tu modelo entrenado con detección de 80 objetos y completa misiones.</p>
 </div>
     """,
     unsafe_allow_html=True,
 )
 
-# Instrucciones con SVG animados
+render_hud()
+render_mission_bar("tm")
+st.markdown("<div style='height:1rem;'></div>", unsafe_allow_html=True)
+
 s1, s2, s3 = st.columns(3, gap="medium")
 with s1:
     st.markdown(
@@ -274,7 +259,7 @@ with s1:
   <div>
     <span class="eq-step-num">01</span>
     <p class="eq-step-title">Encuadra</p>
-    <p class="eq-step-text">Coloca el sujeto en el centro con buena luz.</p>
+    <p class="eq-step-text">Incluye el objeto de la misión en la toma.</p>
   </div>
 </div>
         """,
@@ -287,8 +272,8 @@ with s2:
   {svg_step_capture()}
   <div>
     <span class="eq-step-num">02</span>
-    <p class="eq-step-title">Captura</p>
-    <p class="eq-step-text">Usa la cámara o sube una fotografía.</p>
+    <p class="eq-step-title">Analiza</p>
+    <p class="eq-step-text">Se evalúan el modelo y los objetos a la vez.</p>
   </div>
 </div>
         """,
@@ -301,36 +286,36 @@ with s3:
   {svg_step_result()}
   <div>
     <span class="eq-step-num">03</span>
-    <p class="eq-step-title">Resultado</p>
-    <p class="eq-step-text">Revisa la clase principal y su porcentaje.</p>
+    <p class="eq-step-title">Suma puntos</p>
+    <p class="eq-step-text">Desbloquea objetos nuevos y sube de nivel.</p>
   </div>
 </div>
         """,
         unsafe_allow_html=True,
     )
 
-st.markdown("<div style='height:1.4rem;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)
 
-# Cargar modelo y etiquetas
 model_file = ROOT / "keras_model.h5"
 labels_file = ROOT / "labels.txt"
-
 if not model_file.exists():
     st.error("No se encontró `keras_model.h5` en la raíz del repositorio.")
     st.stop()
 
-with st.spinner("Cargando modelo..."):
-    model = load_keras_model(str(model_file))
+with st.spinner("Cargando modelos..."):
+    tm_model = load_keras_model(str(model_file))
+    detector = load_object_detector()
 labels = load_labels(str(labels_file))
 
-# Zona principal: entrada y resultado
 col_in, col_out = st.columns([1.05, 0.95], gap="large")
 
+raw_bytes = None
 pil_input = None
+
 with col_in:
     st.markdown(
         """
-<div class="eq-frame" style="margin-bottom:0.75rem;">
+<div class="eq-frame" style="margin-bottom:0.7rem;">
   <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
   <span style="font-size:0.86rem;color:#8B929E;">Entrada de imagen</span>
@@ -338,16 +323,14 @@ with col_in:
         """,
         unsafe_allow_html=True,
     )
-    source = st.radio(
-        "Origen",
-        ["Cámara", "Archivo"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    source = st.radio("Origen", ["Cámara", "Archivo"], horizontal=True, label_visibility="collapsed")
+    conf_slider = st.slider("Sensibilidad de objetos", 0.10, 0.90, 0.28, 0.02)
+
     if source == "Cámara":
         cam_img = st.camera_input("Toma una foto", label_visibility="collapsed")
         if cam_img is not None:
-            pil_input = Image.open(cam_img)
+            raw_bytes = cam_img.getvalue()
+            pil_input = Image.open(io.BytesIO(raw_bytes))
     else:
         up_img = st.file_uploader(
             "Sube una imagen",
@@ -355,11 +338,11 @@ with col_in:
             label_visibility="collapsed",
         )
         if up_img is not None:
-            pil_input = Image.open(up_img)
-            st.image(pil_input, width="stretch")
+            raw_bytes = up_img.getvalue()
+            pil_input = Image.open(io.BytesIO(raw_bytes))
 
 with col_out:
-    if pil_input is None:
+    if pil_input is None or raw_bytes is None:
         pills = "".join(f'<span class="eq-pill">{i} · {lbl}</span>' for i, lbl in enumerate(labels))
         st.markdown(
             f"""
@@ -372,21 +355,24 @@ with col_out:
             unsafe_allow_html=True,
         )
     else:
-        preds, elapsed_ms = predict_image(model, pil_input)
+        preds, elapsed_ms = predict_tm(tm_model, pil_input)
+        annotated_rgb, obj_counts = detect_scene_objects(detector, pil_input, conf_slider)
+
         n_classes = min(len(labels), len(preds))
         scores = [(i, labels[i], float(preds[i])) for i in range(n_classes)]
         top_idx, top_label, top_conf = max(scores, key=lambda x: x[2])
 
-        st.session_state["tm_last_idx"] = top_idx
-        st.session_state["tm_last_label"] = top_label
-        st.session_state["tm_last_conf"] = top_conf
+        events = register_scan(raw_bytes, list(obj_counts.keys()), tm_label=top_label)
+
+        for ev in events:
+            st.markdown(f'<div class="eq-event">{ev}</div>', unsafe_allow_html=True)
 
         st.markdown(
             f"""
 <div class="eq-result-box">
   <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
-  <p style="font-size:0.78rem;color:#8B929E;margin:0 0 0.25rem 0;text-transform:uppercase;letter-spacing:0.08em;">Clase detectada</p>
+  <p style="font-size:0.76rem;color:#8B929E;margin:0 0 0.25rem 0;text-transform:uppercase;letter-spacing:0.08em;">Clase del modelo</p>
   <p class="eq-result-label">{top_label}</p>
   <p class="eq-result-meta">{top_conf * 100:.1f} % · {elapsed_ms:.0f} ms</p>
 </div>
@@ -394,7 +380,7 @@ with col_out:
             unsafe_allow_html=True,
         )
 
-        bars_html = ['<div class="eq-frame">']
+        bars_html = ['<div class="eq-frame" style="margin-bottom:0.9rem;">']
         for idx, name, prob in sorted(scores, key=lambda x: x[2], reverse=True):
             pct = max(0.0, min(100.0, prob * 100.0))
             cls = "is-top" if idx == top_idx else ""
@@ -414,201 +400,57 @@ with col_out:
         bars_html.append("</div>")
         st.markdown("".join(bars_html), unsafe_allow_html=True)
 
+        st.image(annotated_rgb, width="stretch")
+
+        if obj_counts:
+            obj_pills = "".join(
+                f'<span class="eq-pill">{name} × {cnt}</span>'
+                for name, cnt in sorted(obj_counts.items(), key=lambda x: x[1], reverse=True)
+            )
+            st.markdown(
+                f"""
+<div class="eq-frame" style="margin-top:0.75rem;">
+  <p style="margin:0 0 0.4rem 0;font-size:0.84rem;color:#8B929E;">Objetos detectados en escena</p>
+  <div>{obj_pills}</div>
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("No se detectaron objetos adicionales. Reduce la sensibilidad si deseas ampliar la búsqueda.")
+
+st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)
+render_collection_grid()
+
 # ---------------------------------------------------------------------------
-# Sección Wokwi en marco propio
+# Circuito Wokwi fijo (480802023080679425)
 # ---------------------------------------------------------------------------
 st.markdown('<hr class="eq-divider">', unsafe_allow_html=True)
 st.markdown(
-    """
-<div class="eq-header" style="margin-bottom:1rem;">
-  <h2 style="font-size:1.35rem;font-weight:600;margin:0 0 0.25rem 0;">Simulación en Wokwi</h2>
-  <p class="eq-subtitle">Integra tu circuito en esta página pegando su enlace o ID, o usa los archivos incluidos.</p>
+    f"""
+<div class="eq-header" style="margin-bottom:0.9rem;">
+  <h2 style="font-size:1.35rem;font-weight:600;margin:0 0 0.25rem 0;">Circuito en Wokwi</h2>
+  <p class="eq-subtitle">Simulación integrada del proyecto {WOKWI_PROJECT_ID}.</p>
 </div>
     """,
     unsafe_allow_html=True,
 )
 
-wokwi_input = st.text_input(
-    "Enlace o ID del proyecto en Wokwi",
-    value=get_default_wokwi_id(),
-    placeholder="https://wokwi.com/projects/437217078075500545",
-)
-wokwi_id = extract_wokwi_id(wokwi_input)
-
-DEFAULT_INO = """#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-const int LED_CARLOS = 8;
-const int LED_OTRO   = 9;
-const int BTN_CARLOS = 2;
-const int BTN_OTRO   = 3;
-
-int estado = -1;
-
-void aplicarEstado(int nuevo) {
-  if (nuevo == estado) return;
-  estado = nuevo;
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  if (estado == 0) {
-    digitalWrite(LED_CARLOS, HIGH);
-    digitalWrite(LED_OTRO, LOW);
-    lcd.print("Clase: 0");
-    lcd.setCursor(0, 1);
-    lcd.print("Carlos");
-    Serial.println("Estado 0: Carlos");
-  } else {
-    digitalWrite(LED_CARLOS, LOW);
-    digitalWrite(LED_OTRO, HIGH);
-    lcd.print("Clase: 1");
-    lcd.setCursor(0, 1);
-    lcd.print("Sin Carlos");
-    Serial.println("Estado 1: Sin Carlos");
-  }
-}
-
-void setup() {
-  Serial.begin(9600);
-  pinMode(LED_CARLOS, OUTPUT);
-  pinMode(LED_OTRO, OUTPUT);
-  pinMode(BTN_CARLOS, INPUT_PULLUP);
-  pinMode(BTN_OTRO, INPUT_PULLUP);
-
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Listo");
-  lcd.setCursor(0, 1);
-  lcd.print("Envia 0 o 1");
-}
-
-void loop() {
-  if (digitalRead(BTN_CARLOS) == LOW) {
-    aplicarEstado(0);
-    delay(200);
-  }
-  if (digitalRead(BTN_OTRO) == LOW) {
-    aplicarEstado(1);
-    delay(200);
-  }
-  if (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '0') aplicarEstado(0);
-    if (c == '1') aplicarEstado(1);
-  }
-}
-"""
-
-DEFAULT_DIAGRAM = """{
-  "version": 1,
-  "author": "Vision",
-  "editor": "wokwi",
-  "parts": [
-    { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} },
-    { "type": "wokwi-lcd1602", "id": "lcd1", "top": -150, "left": 290, "attrs": { "pins": "i2c" } },
-    { "type": "wokwi-led", "id": "led0", "top": 60, "left": 330, "attrs": { "color": "cyan", "label": "Carlos" } },
-    { "type": "wokwi-led", "id": "led1", "top": 60, "left": 390, "attrs": { "color": "red", "label": "Sin Carlos" } },
-    { "type": "wokwi-resistor", "id": "r0", "top": 140, "left": 325, "rotate": 90, "attrs": { "value": "220" } },
-    { "type": "wokwi-resistor", "id": "r1", "top": 140, "left": 385, "rotate": 90, "attrs": { "value": "220" } },
-    { "type": "wokwi-pushbutton", "id": "btn0", "top": 220, "left": 320, "attrs": { "color": "blue", "label": "0" } },
-    { "type": "wokwi-pushbutton", "id": "btn1", "top": 220, "left": 400, "attrs": { "color": "red", "label": "1" } }
-  ],
-  "connections": [
-    [ "uno:5V", "lcd1:VCC", "red", [ "v0" ] ],
-    [ "uno:GND.2", "lcd1:GND", "black", [ "v0" ] ],
-    [ "uno:A4", "lcd1:SDA", "green", [ "v0" ] ],
-    [ "uno:A5", "lcd1:SCL", "yellow", [ "v0" ] ],
-    [ "uno:8", "r0:1", "cyan", [ "v0" ] ],
-    [ "r0:2", "led0:A", "cyan", [ "v0" ] ],
-    [ "led0:C", "uno:GND.1", "black", [ "v0" ] ],
-    [ "uno:9", "r1:1", "red", [ "v0" ] ],
-    [ "r1:2", "led1:A", "red", [ "v0" ] ],
-    [ "led1:C", "uno:GND.1", "black", [ "v0" ] ],
-    [ "uno:2", "btn0:1.l", "blue", [ "v0" ] ],
-    [ "btn0:2.l", "uno:GND.2", "black", [ "v0" ] ],
-    [ "uno:3", "btn1:1.l", "orange", [ "v0" ] ],
-    [ "btn1:2.l", "uno:GND.2", "black", [ "v0" ] ]
-  ],
-  "dependencies": {}
-}
-"""
-
-sketch_code = read_wokwi_file("sketch.ino", DEFAULT_INO)
-diagram_code = read_wokwi_file("diagram.json", DEFAULT_DIAGRAM)
-libs_code = read_wokwi_file("libraries.txt", "LiquidCrystal I2C\n")
-
-tab_sim, tab_ino, tab_diag, tab_libs = st.tabs(
-    ["Simulador", "sketch.ino", "diagram.json", "libraries.txt"]
-)
-
-with tab_sim:
-    last_idx = st.session_state.get("tm_last_idx", None)
-    last_lbl = st.session_state.get("tm_last_label", "Sin lectura")
-
-    if wokwi_id:
-        embed_url = f"https://wokwi.com/projects/{wokwi_id}?embed=1"
-        st.markdown(
-            f"""
+embed_url = f"https://wokwi.com/projects/{WOKWI_PROJECT_ID}?embed=1"
+st.markdown(
+    f"""
 <div class="eq-frame" style="padding:0.75rem;">
   <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
   <span class="eq-corner bl"></span><span class="eq-corner br"></span>
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-    <span style="font-size:0.82rem;color:#8B929E;">Proyecto #{wokwi_id}</span>
-    <span class="eq-pill">Señal actual: {f"{last_idx} · {last_lbl}" if last_idx is not None else "—"}</span>
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <span style="font-size:0.82rem;color:#8B929E;">Wokwi · #{WOKWI_PROJECT_ID}</span>
+    <span class="eq-pill">Puntos actuales: {st.session_state['gm_points']}</span>
   </div>
 </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        components.html(
-            f'<iframe src="{embed_url}" style="width:100%;height:520px;border:1px solid rgba(226,232,240,0.16);background:#090A0C;" allowfullscreen></iframe>',
-            height=535,
-        )
-    else:
-        led0_fill = "#9EC5FF" if last_idx == 0 else "#252932"
-        led1_fill = "#E07A7A" if last_idx == 1 else "#252932"
-        lcd_line1 = f"Clase: {last_idx}" if last_idx is not None else "Esperando"
-        lcd_line2 = last_lbl[:16] if last_idx is not None else "Envia 0 o 1"
-
-        st.markdown(
-            f"""
-<div class="eq-frame">
-  <span class="eq-corner tl"></span><span class="eq-corner tr"></span>
-  <span class="eq-corner bl"></span><span class="eq-corner br"></span>
-  <div style="display:flex;flex-wrap:wrap;gap:1.5rem;align-items:center;justify-content:space-between;">
-    <div style="flex:1;min-width:240px;">
-      <p style="margin:0 0 0.4rem 0;font-weight:600;">Vista previa del circuito</p>
-      <p style="margin:0;color:#8B929E;font-size:0.88rem;line-height:1.5;">
-        Crea un proyecto en Wokwi con <code>sketch.ino</code>, <code>diagram.json</code> y <code>libraries.txt</code>,
-        y pega el enlace arriba para ver el simulador real dentro de este marco.
-      </p>
-    </div>
-    <svg width="290" height="110" viewBox="0 0 290 110" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="2" y="8" width="168" height="94" stroke="rgba(214,228,255,0.28)" fill="#0D1117"/>
-      <rect x="12" y="20" width="148" height="70" fill="#122132" stroke="rgba(158,197,255,0.4)"/>
-      <text x="22" y="48" fill="#D6E4FF" font-family="JetBrains Mono, monospace" font-size="13">{lcd_line1}</text>
-      <text x="22" y="72" fill="#9EC5FF" font-family="JetBrains Mono, monospace" font-size="13">{lcd_line2}</text>
-      <circle cx="215" cy="40" r="12" fill="{led0_fill}" stroke="rgba(214,228,255,0.35)"/>
-      <text x="206" y="70" fill="#8B929E" font-family="JetBrains Mono, monospace" font-size="11">0</text>
-      <circle cx="260" cy="40" r="12" fill="{led1_fill}" stroke="rgba(214,228,255,0.35)"/>
-      <text x="251" y="70" fill="#8B929E" font-family="JetBrains Mono, monospace" font-size="11">1</text>
-    </svg>
-  </div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-with tab_ino:
-    st.code(sketch_code, language="cpp")
-    st.download_button("Descargar sketch.ino", sketch_code, file_name="sketch.ino", mime="text/plain")
-
-with tab_diag:
-    st.code(diagram_code, language="json")
-    st.download_button("Descargar diagram.json", diagram_code, file_name="diagram.json", mime="application/json")
-
-with tab_libs:
-    st.code(libs_code, language="text")
-    st.download_button("Descargar libraries.txt", libs_code, file_name="libraries.txt", mime="text/plain")
+    """,
+    unsafe_allow_html=True,
+)
+components.html(
+    f'<iframe src="{embed_url}" style="width:100%;height:540px;border:1px solid rgba(226,232,240,0.16);background:#090A0C;" allowfullscreen></iframe>',
+    height=555,
+)
