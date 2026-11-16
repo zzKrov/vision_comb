@@ -127,6 +127,8 @@ def init_game_state() -> None:
         "gm_mission": "Celular",
         "gm_seen_hashes": [],
         "gm_last_events": [],
+        "tm_last_idx": None,
+        "tm_last_label": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -147,26 +149,25 @@ def reset_game_state() -> None:
     st.session_state["gm_mission"] = random.choice(MISSION_POOL)
     st.session_state["gm_seen_hashes"] = []
     st.session_state["gm_last_events"] = []
+    st.session_state["tm_last_idx"] = None
+    st.session_state["tm_last_label"] = None
 
 
-def get_rank_info(points: int) -> tuple[str, int, int]:
-    current_name = RANKS[0][1]
-    current_floor = 0
-    next_target = RANKS[1][0]
-    for idx, (threshold, title) in enumerate(RANKS):
+def get_rank_info(points: int) -> str:
+    rank = RANKS[0][1]
+    for threshold, title in RANKS:
         if points >= threshold:
-            current_name = title
-            current_floor = threshold
-            next_target = RANKS[idx + 1][0] if idx + 1 < len(RANKS) else threshold
-    return current_name, current_floor, next_target
+            rank = title
+    return rank
 
 
 def register_scan(
     image_bytes: bytes,
     detected_objects: list[str],
+    tm_idx: int | None = None,
     tm_label: str | None = None,
 ) -> list[str]:
-    """Evalúa logros, desbloqueos y misión sin duplicar la misma imagen."""
+    """Evalúa puntos, misión, descubrimientos y coincidencias sin duplicar la misma imagen."""
     init_game_state()
     img_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
     if img_hash in st.session_state["gm_seen_hashes"]:
@@ -179,7 +180,7 @@ def register_scan(
     gained = 0
     unique_objs = list(dict.fromkeys(detected_objects))
 
-    if unique_objs or tm_label:
+    if unique_objs or tm_label is not None:
         gained += 15
         events.append("+15 pts · Lectura registrada")
 
@@ -202,9 +203,12 @@ def register_scan(
     elif unique_objs:
         st.session_state["gm_streak"] = 0
 
-    if tm_label and "sin" not in tm_label.lower() and "Persona" in unique_objs:
+    if tm_idx == 0 and "Persona" in unique_objs:
         gained += 40
         events.append(f"+40 pts · Coincidencia ({tm_label} + Persona)")
+    elif tm_idx == 1 and "Persona" not in unique_objs and unique_objs:
+        gained += 30
+        events.append(f"+30 pts · Escena sin personas ({tm_label})")
 
     st.session_state["gm_points"] += gained
     st.session_state["gm_last_events"] = events
@@ -226,7 +230,6 @@ def inject_theme() -> None:
   --text: #F4F5F7;
   --muted: #8B929E;
   --accent: #D6E4FF;
-  --ok: #9EC5FF;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -298,9 +301,7 @@ header[data-testid="stHeader"] {
   background: var(--accent);
 }
 
-.eq-brand:hover .eq-brand-mark {
-  transform: rotate(90deg);
-}
+.eq-brand:hover .eq-brand-mark { transform: rotate(90deg); }
 
 [data-testid="stPageLink-NavLink"] {
   border: 1px solid var(--border) !important;
@@ -325,20 +326,16 @@ header[data-testid="stHeader"] {
   transform: translateY(-1px);
 }
 
-[data-testid="stPageLink-NavLink"]:hover p {
-  color: var(--text) !important;
-}
+[data-testid="stPageLink-NavLink"]:hover p { color: var(--text) !important; }
 
 [data-testid="stPageLink-NavLink"][aria-current="page"] {
   border-color: var(--accent) !important;
   background: rgba(214, 228, 255, 0.08) !important;
 }
 
-[data-testid="stPageLink-NavLink"][aria-current="page"] p {
-  color: var(--accent) !important;
-}
+[data-testid="stPageLink-NavLink"][aria-current="page"] p { color: var(--accent) !important; }
 
-.eq-header { margin-bottom: 1.5rem; }
+.eq-header { margin-bottom: 1.4rem; }
 
 .eq-title {
   font-size: clamp(1.85rem, 3vw, 2.4rem);
@@ -349,17 +346,13 @@ header[data-testid="stHeader"] {
   margin: 0 0 0.4rem 0;
 }
 
-.eq-subtitle {
-  font-size: 0.95rem;
-  color: var(--muted);
-  margin: 0;
-}
+.eq-subtitle { font-size: 0.95rem; color: var(--muted); margin: 0; }
 
 .eq-hud {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.75rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.1rem;
 }
 
 @media (max-width: 768px) {
@@ -373,10 +366,7 @@ header[data-testid="stHeader"] {
   transition: border-color 0.25s var(--ease), transform 0.25s var(--ease);
 }
 
-.eq-hud-cell:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
-}
+.eq-hud-cell:hover { border-color: var(--border-strong); transform: translateY(-1px); }
 
 .eq-hud-k {
   font-size: 0.72rem;
@@ -389,7 +379,7 @@ header[data-testid="stHeader"] {
 
 .eq-hud-v {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 1.08rem;
+  font-size: 1.06rem;
   font-weight: 500;
   color: var(--accent);
 }
@@ -421,19 +411,8 @@ header[data-testid="stHeader"] {
 
 .eq-card:hover::before { transform: translateX(100%); }
 
-.eq-card-title {
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--text);
-  margin: 0.75rem 0 0.3rem 0;
-}
-
-.eq-card-desc {
-  font-size: 0.88rem;
-  color: var(--muted);
-  line-height: 1.48;
-  margin: 0;
-}
+.eq-card-title { font-size: 1.1rem; font-weight: 600; color: var(--text); margin: 0.75rem 0 0.3rem 0; }
+.eq-card-desc { font-size: 0.88rem; color: var(--muted); line-height: 1.48; margin: 0; }
 
 .eq-frame {
   position: relative;
@@ -473,10 +452,7 @@ header[data-testid="stHeader"] {
   transition: border-color 0.3s var(--ease), transform 0.3s var(--ease);
 }
 
-.eq-step:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-2px);
-}
+.eq-step:hover { border-color: var(--border-strong); transform: translateY(-2px); }
 
 .eq-step-num {
   font-family: 'JetBrains Mono', monospace;
@@ -534,15 +510,8 @@ header[data-testid="stHeader"] {
   transition: border-color 0.25s var(--ease), transform 0.25s var(--ease);
 }
 
-.eq-pill:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
-}
-
-.eq-pill.is-locked {
-  color: var(--muted);
-  opacity: 0.55;
-}
+.eq-pill:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.eq-pill.is-locked { color: var(--muted); opacity: 0.52; }
 
 .eq-event {
   border-left: 2px solid var(--accent);
@@ -660,7 +629,7 @@ def render_hud() -> None:
     streak = st.session_state["gm_streak"]
     unlocked = st.session_state["gm_unlocked"]
     mission = st.session_state["gm_mission"]
-    rank, _, _ = get_rank_info(pts)
+    rank = get_rank_info(pts)
 
     st.markdown(
         f"""
