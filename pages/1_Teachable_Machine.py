@@ -16,7 +16,9 @@ from ui_theme import (
     svg_step_result,
 )
 
-DEFAULT_WOKWI_ID = "480802023080679425"
+# Pega aquí el ID numérico de tu proyecto en Wokwi si deseas que cargue por defecto
+# Ejemplo: "437217078075500545"
+DEFAULT_WOKWI_ID = ""
 
 st.set_page_config(
     page_title="Clasificación · Visión",
@@ -96,21 +98,60 @@ def load_keras_model(model_path: str):
         ]
         if not weight_names:
             return
-        values = [np.asarray(group[wn]) for wn in weight_names]
-        ordered_vars = []
+
+        by_key = {}
+        all_leaves = []
         for lyr in target_layers:
             for leaf in _iter_leaf_layers(lyr):
-                ordered_vars.extend(leaf.weights)
-        if len(values) != len(ordered_vars):
-            raise ValueError(
-                f"Conteo de pesos incompatible en {group.name}: {len(values)} vs {len(ordered_vars)}"
-            )
-        for var, val in zip(ordered_vars, values):
-            if tuple(var.shape) != val.shape:
+                all_leaves.append(leaf)
+                for var in leaf.weights:
+                    vname = var.name.split(":")[0].split("/")[-1]
+                    by_key.setdefault((leaf.name, vname), []).append(var)
+
+        assigned = set()
+        unmatched = []
+
+        for wn in weight_names:
+            val = np.asarray(group[wn])
+            clean = wn.split(":")[0]
+            parts = clean.split("/")
+            lname = parts[-2] if len(parts) >= 2 else group.name.rsplit("/", 1)[-1]
+            vname = parts[-1]
+
+            matched_var = None
+            for var in by_key.get((lname, vname), []):
+                if id(var) not in assigned and tuple(var.shape) == val.shape:
+                    matched_var = var
+                    break
+
+            if matched_var is not None:
+                matched_var.assign(val)
+                assigned.add(id(matched_var))
+            else:
+                unmatched.append((wn, val))
+
+        if unmatched:
+            trainable_vars = []
+            non_trainable_vars = []
+            for leaf in all_leaves:
+                for var in leaf.trainable_weights:
+                    if id(var) not in assigned:
+                        trainable_vars.append(var)
+                for var in leaf.non_trainable_weights:
+                    if id(var) not in assigned:
+                        non_trainable_vars.append(var)
+            rem_vars = trainable_vars + non_trainable_vars
+
+            if len(unmatched) != len(rem_vars):
                 raise ValueError(
-                    f"Forma incompatible para {var.name}: {tuple(var.shape)} vs {val.shape}"
+                    f"Conteo incompatible en {group.name}: {len(unmatched)} vs {len(rem_vars)}"
                 )
-            var.assign(val)
+            for (wn, val), var in zip(unmatched, rem_vars):
+                if tuple(var.shape) != val.shape:
+                    raise ValueError(
+                        f"Forma incompatible para {wn} -> {var.name}: {val.shape} vs {tuple(var.shape)}"
+                    )
+                var.assign(val)
 
     def _apply_step(x, layer):
         y = layer(x)
