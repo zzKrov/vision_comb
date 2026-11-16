@@ -16,9 +16,7 @@ from ui_theme import (
     svg_step_result,
 )
 
-# Pega aquí el ID numérico de tu proyecto en Wokwi si deseas que cargue por defecto
-# Ejemplo: "437217078075500545"
-DEFAULT_WOKWI_ID = ""
+DEFAULT_WOKWI_ID = "480802023080679425"
 
 st.set_page_config(
     page_title="Clasificación · Visión",
