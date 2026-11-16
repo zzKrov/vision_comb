@@ -33,21 +33,135 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @st.cache_resource(show_spinner=False)
 def load_keras_model(model_path: str):
+    import json
+    import h5py
     import tensorflow as tf
 
+    # 1) Carga directa (TF 2.15 / Keras 2 o modelos .h5 simples)
     try:
         return tf.keras.models.load_model(model_path, compile=False)
     except Exception:
-        class CompatDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
-            def __init__(self, **kwargs):
-                kwargs.pop("groups", None)
-                super().__init__(**kwargs)
+        pass
 
+    class CompatDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
+        def __init__(self, **kwargs):
+            kwargs.pop("groups", None)
+            super().__init__(**kwargs)
+
+    # 2) Parche simple para DepthwiseConv2D (groups=1)
+    try:
         return tf.keras.models.load_model(
             model_path,
             compile=False,
             custom_objects={"DepthwiseConv2D": CompatDepthwiseConv2D},
         )
+    except Exception:
+        pass
+
+    # 3) Reconstrucción compatible para Sequential anidados (Teachable Machine en Keras 3)
+    from keras.src.legacy.saving import saving_options, saving_utils
+
+    def _strip_groups(obj):
+        if isinstance(obj, dict):
+            if obj.get("class_name") == "DepthwiseConv2D" and isinstance(obj.get("config"), dict):
+                obj["config"].pop("groups", None)
+            return {k: _strip_groups(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_strip_groups(v) for v in obj]
+        return obj
+
+    def _find_input_shape(cfg_dict):
+        bshape = cfg_dict.get("config", {}).get("build_input_shape")
+        if isinstance(bshape, (list, tuple)) and len(bshape) > 1:
+            return tuple(bshape[1:])
+        for lyr in cfg_dict.get("config", {}).get("layers", []):
+            lcfg = lyr.get("config", {})
+            for key in ("batch_input_shape", "batch_shape", "build_input_shape"):
+                val = lcfg.get(key)
+                if isinstance(val, (list, tuple)) and len(val) > 1:
+                    return tuple(val[1:])
+        return (224, 224, 3)
+
+    def _iter_leaf_layers(layer):
+        if hasattr(layer, "layers") and layer.layers:
+            for sub in layer.layers:
+                yield from _iter_leaf_layers(sub)
+        else:
+            yield layer
+
+    def _assign_group_weights(group, target_layers):
+        weight_names = [
+            n.decode("utf-8") if isinstance(n, bytes) else n
+            for n in group.attrs.get("weight_names", [])
+        ]
+        if not weight_names:
+            return
+        values = [np.asarray(group[wn]) for wn in weight_names]
+        ordered_vars = []
+        for lyr in target_layers:
+            for leaf in _iter_leaf_layers(lyr):
+                ordered_vars.extend(leaf.weights)
+        if len(values) != len(ordered_vars):
+            raise ValueError(
+                f"Conteo de pesos incompatible en {group.name}: {len(values)} vs {len(ordered_vars)}"
+            )
+        for var, val in zip(ordered_vars, values):
+            if tuple(var.shape) != val.shape:
+                raise ValueError(
+                    f"Forma incompatible para {var.name}: {tuple(var.shape)} vs {val.shape}"
+                )
+            var.assign(val)
+
+    def _apply_step(x, layer):
+        y = layer(x)
+        if isinstance(y, (list, tuple)):
+            y = y[0]
+        return y
+
+    with h5py.File(model_path, "r") as f:
+        raw_cfg = f.attrs["model_config"]
+        if isinstance(raw_cfg, bytes):
+            raw_cfg = raw_cfg.decode("utf-8")
+        cfg = _strip_groups(json.loads(raw_cfg))
+        weights_group = f["model_weights"]
+
+        inp = tf.keras.Input(shape=_find_input_shape(cfg))
+        x = inp
+
+        top_layers_cfg = cfg.get("config", {}).get("layers", [])
+        pending_weights = []
+
+        with saving_options.keras_option_scope(use_legacy_config=True):
+            for sub_cfg in top_layers_cfg:
+                if sub_cfg.get("class_name") == "InputLayer":
+                    continue
+                sub_name = sub_cfg.get("config", {}).get("name")
+                loaded_sub = None
+                try:
+                    cand = saving_utils.model_from_config(sub_cfg)
+                    x = _apply_step(x, cand)
+                    loaded_sub = [cand]
+                except Exception:
+                    if sub_cfg.get("class_name") == "Sequential":
+                        inner_list = []
+                        for inner_cfg in sub_cfg.get("config", {}).get("layers", []):
+                            if inner_cfg.get("class_name") == "InputLayer":
+                                continue
+                            inner_obj = saving_utils.model_from_config(inner_cfg)
+                            x = _apply_step(x, inner_obj)
+                            inner_list.append(inner_obj)
+                        loaded_sub = inner_list
+                    else:
+                        raise
+                if sub_name and sub_name in weights_group and loaded_sub:
+                    pending_weights.append((weights_group[sub_name], loaded_sub))
+
+        model = tf.keras.Model(inputs=inp, outputs=x)
+
+        for grp, targets in pending_weights:
+            _assign_group_weights(grp, targets)
+
+        return model
 
 
 @st.cache_data(show_spinner=False)
