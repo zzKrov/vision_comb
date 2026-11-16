@@ -1,12 +1,16 @@
 streamlit
-streamlit-webrtc
-numpy<2
 pandas
 Pillow
 opencv-python-headless
-tensorflow==2.15.1
-keras==2.15.0
-torch==2.5.1
-torchvision==0.20.1
 ultralytics
 setuptools
+numpy<2; python_version < "3.12"
+numpy>=2.0; python_version >= "3.12"
+tensorflow==2.15.1; python_version < "3.12"
+keras==2.15.0; python_version < "3.12"
+torch==2.5.1; python_version < "3.12"
+torchvision==0.20.1; python_version < "3.12"
+tensorflow>=2.16.1,<2.22; python_version >= "3.12" and python_version < "3.14"
+tensorflow==2.22.0rc0; python_version >= "3.14"
+torch; python_version >= "3.12"
+torchvision; python_version >= "3.12"
